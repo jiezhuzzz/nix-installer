@@ -29,10 +29,10 @@ impl CreateGroup {
         match OperatingSystem::host() {
             OperatingSystem::MacOSX { .. } | OperatingSystem::Darwin => (),
             _ => {
-                if !(which::which("groupadd").is_ok() || which::which("addgroup").is_ok()) {
+                if !(which::which("lgroupadd").is_ok() || which::which("addgroup").is_ok()) {
                     return Err(Self::error(ActionErrorKind::MissingGroupCreationCommand));
                 }
-                if !(which::which("groupdel").is_ok() || which::which("delgroup").is_ok()) {
+                if !(which::which("lgroupdel").is_ok() || which::which("delgroup").is_ok()) {
                     return Err(Self::error(ActionErrorKind::MissingGroupDeletionCommand));
                 }
             },
@@ -116,11 +116,11 @@ impl Action for CreateGroup {
                 .map_err(Self::error)?;
             },
             _ => {
-                if which::which("groupadd").is_ok() {
+                if which::which("lgroupadd").is_ok() {
                     execute_command(
-                        Command::new("groupadd")
+                        Command::new("lgroupadd")
                             .process_group(0)
-                            .args(["-g", &gid.to_string(), "--system", name])
+                            .args(["-g", &gid.to_string(), "-r", name])
                             .stdin(std::process::Stdio::null()),
                     )
                     .await

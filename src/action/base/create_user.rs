@@ -47,7 +47,7 @@ impl CreateUser {
         match OperatingSystem::host() {
             OperatingSystem::MacOSX { .. } | OperatingSystem::Darwin => (),
             _ => {
-                if !(which::which("useradd").is_ok() || which::which("adduser").is_ok()) {
+                if !(which::which("luseradd").is_ok() || which::which("adduser").is_ok()) {
                     return Err(Self::error(ActionErrorKind::MissingUserCreationCommand));
                 }
                 if !(which::which("userdel").is_ok() || which::which("deluser").is_ok()) {
@@ -137,21 +137,19 @@ impl Action for CreateUser {
                     .map_err(Self::error)?;
             },
             _ => {
-                if which::which("useradd").is_ok() {
+                if which::which("luseradd").is_ok() {
                     execute_command(
-                        Command::new("useradd")
+                        Command::new("luseradd")
                             .process_group(0)
                             .args([
-                                "--home-dir",
+                                "-d",
                                 "/var/empty",
-                                "--comment",
+                                "--gecos",
                                 comment,
                                 "--gid",
                                 &gid.to_string(),
-                                "--groups",
-                                &gid.to_string(),
-                                "--no-user-group",
-                                "--system",
+                                "--nocreategroup",
+                                "-r",
                                 "--shell",
                                 "/sbin/nologin",
                                 "--uid",
