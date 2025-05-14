@@ -2,7 +2,7 @@
   description = "The Determinate Nix Installer";
 
   inputs = {
-    nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/0.1.tar.gz";
+    nixpkgs.url = "https://flakehub.com/f/NixOS/nixpkgs/=0.1.793735";
 
     crane.url = "github:ipetkov/crane/v0.20.0";
 
@@ -23,8 +23,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.nix.follows = "nix";
     };
-
-    flake-compat.url = "https://flakehub.com/f/edolstra/flake-compat/1.0.0.tar.gz";
   };
 
   outputs =
@@ -36,7 +34,7 @@
     , ...
     } @ inputs:
     let
-      nix_tarball_url_prefix = "https://releases.nixos.org/nix/nix-2.28.2/nix-2.28.2-";
+      nix_tarball_url_prefix = "https://releases.nixos.org/nix/nix-2.28.3/nix-2.28.3-";
       supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       systemsSupportedByDeterminateNixd = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
 
