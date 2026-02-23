@@ -77,9 +77,12 @@ impl Shell {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn self_test(&self) -> Result<(), SelfTestError> {
         let executable = self.executable();
+
+        tracing::info!("Running self test for shell {executable}");
+
         let mut command = match &self {
             // On Mac, `bash -ic nix` won't work, but `bash -lc nix` will.
             Shell::Sh | Shell::Bash => {
@@ -155,9 +158,11 @@ impl Shell {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn self_test() -> Result<(), Vec<SelfTestError>> {
     let shells = Shell::discover();
+
+    tracing::debug!(?shells, "Discovered shells to self test");
 
     let mut failures = vec![];
 
