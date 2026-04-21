@@ -28,6 +28,28 @@ pub enum UnitSrc {
     Literal(String),
 }
 
+impl UnitSrc {
+    pub async fn place(&self, dest: &Path) -> Result<(), ActionErrorKind> {
+        match self {
+            UnitSrc::Path(src) => {
+                tracing::trace!(src = %src.display(), dest = %dest.display(), "Symlinking");
+                tokio::fs::symlink(src, dest).await.map_err(|e| {
+                    ActionErrorKind::Symlink(PathBuf::from(src), dest.to_path_buf(), e)
+                })?;
+            },
+            UnitSrc::Literal(content) => {
+                tracing::trace!(src = %content, dest = %dest.display(), "Writing");
+
+                tokio::fs::write(&dest, content)
+                    .await
+                    .map_err(|e| ActionErrorKind::Write(dest.to_path_buf(), e))?;
+            },
+        }
+
+        Ok(())
+    }
+}
+
 /**
 Configure the init to run the Nix daemon
 */
@@ -37,7 +59,7 @@ pub struct ConfigureInitService {
     init: InitSystem,
     start_daemon: bool,
     // TODO(cole-h): make an enum so we can distinguish between "written out by another step" vs "actually there isn't one"
-    service_src: Option<PathBuf>,
+    service_src: Option<UnitSrc>,
     service_name: Option<String>,
     service_dest: Option<PathBuf>,
     socket_files: Vec<SocketFile>,
@@ -94,7 +116,7 @@ impl ConfigureInitService {
     pub async fn plan(
         init: InitSystem,
         start_daemon: bool,
-        service_src: Option<PathBuf>,
+        service_src: Option<UnitSrc>,
         service_dest: Option<PathBuf>,
         service_name: Option<String>,
         socket_files: Vec<SocketFile>,
@@ -159,19 +181,24 @@ impl Action for ConfigureInitService {
         let mut vec = Vec::new();
         match self.init {
             InitSystem::Systemd => {
+                let service_dest = self
+                    .service_dest
+                    .as_ref()
+                    .expect("service_dest should be defined for systemd")
+                    .display();
+
                 let mut explanation = vec![
                     "Run `systemd-tmpfiles --create --prefix=/nix/var/nix`".to_string(),
-                    format!(
-                        "Symlink `{0}` to `{1}`",
-                        self.service_src
-                            .as_ref()
-                            .expect("service_src should be defined for systemd")
-                            .display(),
-                        self.service_dest
-                            .as_ref()
-                            .expect("service_src should be defined for systemd")
-                            .display()
-                    ),
+                    match self
+                        .service_src
+                        .as_ref()
+                        .expect("service_src should be defined or systemd")
+                    {
+                        UnitSrc::Path(src) => {
+                            format!("Symlink `{0}` to `{1}`", src.display(), service_dest,)
+                        },
+                        UnitSrc::Literal(_) => format!("Create `{0}`", service_dest,),
+                    },
                 ];
 
                 for SocketFile { src, dest, .. } in self.socket_files.iter() {
@@ -195,19 +222,35 @@ impl Action for ConfigureInitService {
                         explanation.push(format!("Run `systemctl enable --now {}`", name));
                     }
                 }
+
+                explanation.push(format!(
+                    "Run `systemctl enable {}{}`",
+                    if self.start_daemon { "--now " } else { "" },
+                    service_dest
+                ));
+
                 vec.push(ActionDescription::new(self.tracing_synopsis(), explanation))
             },
             InitSystem::Launchd => {
                 let mut explanation = vec![];
                 if let Some(service_src) = self.service_src.as_ref() {
-                    explanation.push(format!(
-                        "Copy `{0}` to `{1}`",
-                        service_src.display(),
-                        self.service_dest
-                            .as_ref()
-                            .expect("service_dest should be defined for launchd")
-                            .display(),
-                    ));
+                    explanation.push(match service_src {
+                        UnitSrc::Path(src) => format!(
+                            "Copy `{0}` to `{1}`",
+                            src.display(),
+                            self.service_dest
+                                .as_ref()
+                                .expect("service_dest should be defined for launchd")
+                                .display(),
+                        ),
+                        UnitSrc::Literal(_) => format!(
+                            "Create `{0}`",
+                            self.service_dest
+                                .as_ref()
+                                .expect("service_dest should be defined for launchd")
+                                .display(),
+                        ),
+                    });
                 }
 
                 if self.start_daemon {
@@ -248,15 +291,26 @@ impl Action for ConfigureInitService {
                 let domain = DARWIN_LAUNCHD_DOMAIN;
 
                 if let Some(service_src) = service_src {
-                    tokio::fs::copy(&service_src, service_dest)
-                        .await
-                        .map_err(|e| {
-                            Self::error(ActionErrorKind::Copy(
-                                service_src.clone(),
-                                PathBuf::from(service_dest),
-                                e,
-                            ))
-                        })?;
+                    match service_src {
+                        UnitSrc::Path(src) => {
+                            tracing::trace!(src = %src.display(), dest = %service_dest.display(), "Copying");
+                            tokio::fs::copy(&src, service_dest).await.map_err(|e| {
+                                Self::error(ActionErrorKind::Copy(
+                                    src.clone(),
+                                    PathBuf::from(service_dest),
+                                    e,
+                                ))
+                            })?;
+                        },
+                        UnitSrc::Literal(content) => {
+                            tracing::trace!(src = %content, dest = %service_dest.display(), "Writing");
+
+                            tokio::fs::write(&service_dest, content)
+                                .await
+                                .map_err(|e| ActionErrorKind::Write(service_dest.clone(), e))
+                                .map_err(Self::error)?;
+                        },
+                    }
                 }
 
                 crate::action::macos::retry_bootstrap(domain, service, service_dest)
@@ -348,29 +402,16 @@ impl Action for ConfigureInitService {
                 // cli, interactively ask for permission to remove the file
 
                 if let Some(service_src) = service_src.as_ref() {
-                    Self::check_if_systemd_unit_exists(
-                        &UnitSrc::Path(service_src.to_path_buf()),
-                        service_dest,
-                    )
-                    .await
-                    .map_err(Self::error)?;
+                    Self::check_if_systemd_unit_exists(service_src, service_dest)
+                        .await
+                        .map_err(Self::error)?;
 
                     crate::util::remove_file(service_dest, OnMissing::Ignore)
                         .await
                         .map_err(|e| ActionErrorKind::Remove(service_dest.into(), e))
                         .map_err(Self::error)?;
 
-                    tracing::trace!(src = %service_src.display(), dest = %service_dest.display(), "Symlinking");
-                    tokio::fs::symlink(service_src, service_dest)
-                        .await
-                        .map_err(|e| {
-                            ActionErrorKind::Symlink(
-                                service_src.clone(),
-                                PathBuf::from(service_dest),
-                                e,
-                            )
-                        })
-                        .map_err(Self::error)?;
+                    service_src.place(service_dest).await.map_err(Self::error)?;
                 }
 
                 for SocketFile { src, dest, .. } in socket_files.iter() {
@@ -439,6 +480,10 @@ impl Action for ConfigureInitService {
                         },
                     }
                 }
+
+                enable(service_dest.display().to_string().as_ref(), *start_daemon)
+                    .await
+                    .map_err(Self::error)?;
             },
             InitSystem::None => {
                 // Nothing here, no init system
@@ -457,13 +502,7 @@ impl Action for ConfigureInitService {
                     steps.push(format!("Run `systemctl disable {}`", name));
                 }
 
-                steps.push(format!(
-                    "Run `systemctl disable {0}`",
-                    self.service_src
-                        .as_ref()
-                        .expect("service_src should be defined for systemd")
-                        .display()
-                ));
+                steps.push("Run `systemctl disable nix-daemon.service`".to_string());
                 steps.push("Run `systemd-tempfiles --remove --prefix=/nix/var/nix`".to_string());
                 steps.push("Run `systemctl daemon-reload`".to_string());
 

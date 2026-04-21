@@ -24,6 +24,8 @@ pub enum SelfTestError {
     },
     #[error(transparent)]
     SystemTime(#[from] std::time::SystemTimeError),
+    #[error("command timed out")]
+    TimedOut { shell: Shell, command: String },
 }
 
 #[cfg(feature = "diagnostics")]
@@ -34,6 +36,7 @@ impl crate::diagnostics::ErrorDiagnostic for SelfTestError {
             Self::ShellFailed { shell, .. } => vec![shell.to_string()],
             Self::Command { shell, .. } => vec![shell.to_string()],
             Self::SystemTime(_) => vec![],
+            Self::TimedOut { shell, .. } => vec![shell.to_string()],
         };
         format!(
             "{}({})",
@@ -74,9 +77,12 @@ impl Shell {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(level = "debug", skip_all)]
     pub async fn self_test(&self) -> Result<(), SelfTestError> {
         let executable = self.executable();
+
+        tracing::info!("Running self test for shell {executable}");
+
         let mut command = match &self {
             // On Mac, `bash -ic nix` won't work, but `bash -lc nix` will.
             Shell::Sh | Shell::Bash => {
@@ -95,8 +101,6 @@ impl Shell {
         const SYSTEM: &str = "x86_64-linux";
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         const SYSTEM: &str = "aarch64-linux";
-        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        const SYSTEM: &str = "x86_64-darwin";
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         const SYSTEM: &str = "aarch64-darwin";
 
@@ -105,7 +109,7 @@ impl Shell {
             .as_millis();
 
         command.arg(format!(
-            r#"nix build --option substitute false --option post-build-hook '' --no-link --expr 'derivation {{ name = "self-test-{executable}-{timestamp_millis}"; system = "{SYSTEM}"; builder = "/bin/sh"; args = ["-c" "echo hello > \$out"]; }}'"#
+            r#"exec nix build --option substitute false --option post-build-hook '' --no-link --expr 'derivation {{ name = "self-test-{executable}-{timestamp_millis}"; system = "{SYSTEM}"; builder = "/bin/sh"; args = ["-c" "echo hello > \$out"]; }}'"#
         ));
         let command_str = format!("{:?}", command.as_std());
 
@@ -116,8 +120,14 @@ impl Shell {
         let output = command
             .stdin(std::process::Stdio::null())
             .env("NIX_REMOTE", "daemon")
-            .output()
+            .kill_on_drop(true)
+            .output();
+        let output = tokio::time::timeout(std::time::Duration::from_secs(10), output)
             .await
+            .map_err(|_| SelfTestError::TimedOut {
+                shell: *self,
+                command: command_str.clone(),
+            })?
             .map_err(|error| SelfTestError::Command {
                 shell: *self,
                 command: command_str.clone(),
@@ -148,9 +158,11 @@ impl Shell {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn self_test() -> Result<(), Vec<SelfTestError>> {
     let shells = Shell::discover();
+
+    tracing::debug!(?shells, "Discovered shells to self test");
 
     let mut failures = vec![];
 

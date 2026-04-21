@@ -132,18 +132,23 @@ impl DiagnosticData {
         proxy: Option<Url>,
     ) -> Result<(Self, Worker), detsys_ids_client::transport::TransportsError> {
         let mut builder: Builder = detsys_ids_client::builder!()
-            .set_endpoint(endpoint)
-            .set_proxy(proxy);
+            .endpoint(endpoint)
+            .proxy(proxy);
 
         if let Some(ssl_cert_file) = ssl_cert_file.and_then(|v| v.canonicalize().ok()) {
-            builder = builder.set_certificate(crate::parse_ssl_cert(&ssl_cert_file).await.ok());
+            builder.set_certificate(crate::parse_ssl_cert(&ssl_cert_file).await.ok());
         }
 
         if std::env::var("DETSYS_CORRELATION").ok() != attribution && attribution.is_some() {
             // Don't set the attribution if the attribution was set to the same as DETSYS_CORRELATION
-            builder = builder.set_distinct_id(attribution.map(|v| v.into()));
+            builder.set_distinct_id(attribution.map(|v| v.into()));
         }
         let (ids_client, ids_worker) = builder.build_or_default().await;
+
+        ids_client
+            .wait_for_checkin(Some(std::time::Duration::from_millis(500)))
+            .await
+            .ok();
 
         Ok((Self { ids_client }, ids_worker))
     }
@@ -197,7 +202,9 @@ impl ErrorDiagnostic for DiagnosticError {
 }
 
 impl crate::feedback::Feedback for DiagnosticData {
-    async fn get_feature_ptr_payload<T: serde::de::DeserializeOwned + Send + std::fmt::Debug>(
+    async fn get_feature_ptr_payload<
+        T: serde::ser::Serialize + serde::de::DeserializeOwned + Send + std::fmt::Debug,
+    >(
         &self,
         name: impl Into<String> + std::fmt::Debug + Send,
     ) -> Option<T> {
@@ -209,24 +216,25 @@ impl crate::feedback::Feedback for DiagnosticData {
         planner: &crate::planner::BuiltinPlanner,
     ) -> Result<(), crate::planner::PlannerError> {
         self.ids_client
-            .add_fact("planner", planner.typetag_name().into())
+            .set_fact("planner", planner.typetag_name().into())
+            .await;
+
+        self.ids_client
+            .set_fact(
+                "install_determinate_nix",
+                planner
+                    .common_settings()
+                    .distribution()
+                    .is_determinate()
+                    .into(),
+            )
             .await;
 
         if let Ok(ref settings) = planner.configured_settings().await {
             self.ids_client
-                .add_fact(
+                .set_fact(
                     "configured_settings",
                     settings.keys().cloned().collect::<Vec<_>>().into(),
-                )
-                .await;
-
-            self.ids_client
-                .add_fact(
-                    "install_determinate_nix",
-                    settings
-                        .get("determinate_nix")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Bool(false)),
                 )
                 .await;
         }

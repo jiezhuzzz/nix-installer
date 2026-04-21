@@ -1,13 +1,13 @@
 use crate::{
     action::{
-        base::{CreateDirectory, CreateFile, RemoveDirectory},
+        base::{CreateDirectory, CreateFile},
         common::{
-            ConfigureNix, ConfigureUpstreamInitService, CreateUsersAndGroups,
-            ProvisionDeterminateNixd, ProvisionNix,
+            ConfigureDeterminateNixdInitService, ConfigureNix, ConfigureUpstreamInitService,
+            CreateUsersAndGroups, ProvisionDeterminateNixd, ProvisionNix,
         },
         linux::{
             provision_selinux::{DETERMINATE_SELINUX_POLICY_PP_CONTENT, SELINUX_POLICY_PP_CONTENT},
-            ProvisionSelinux, StartSystemdUnit, SystemctlDaemonReload,
+            Cleanup, ProvisionSelinux, StartSystemdUnit, SystemctlDaemonReload,
         },
         StatefulAction,
     },
@@ -228,20 +228,29 @@ impl Planner for Ostree {
                 .boxed(),
         );
 
-        plan.push(
-            ConfigureUpstreamInitService::plan(InitSystem::Systemd, true)
-                .await
-                .map_err(PlannerError::Action)?
-                .boxed(),
-        );
+        let init = InitSystem::Systemd;
+        let start_daemon = true;
+        match self.settings.distribution() {
+            Distribution::DeterminateNix => {
+                plan.push(
+                    ConfigureDeterminateNixdInitService::plan(init, start_daemon)
+                        .await
+                        .map_err(PlannerError::Action)?
+                        .boxed(),
+                );
+            },
+            Distribution::Nix => {
+                plan.push(
+                    ConfigureUpstreamInitService::plan(init, start_daemon)
+                        .await
+                        .map_err(PlannerError::Action)?
+                        .boxed(),
+                );
+            },
+        }
+
         plan.push(
             StartSystemdUnit::plan("ensure-symlinked-units-resolve.service".to_string(), true)
-                .await
-                .map_err(PlannerError::Action)?
-                .boxed(),
-        );
-        plan.push(
-            RemoveDirectory::plan(crate::settings::SCRATCH_DIR)
                 .await
                 .map_err(PlannerError::Action)?
                 .boxed(),
@@ -252,6 +261,7 @@ impl Planner for Ostree {
                 .map_err(PlannerError::Action)?
                 .boxed(),
         );
+        plan.push(Cleanup::plan().await.map_err(PlannerError::Action)?.boxed());
 
         Ok(plan)
     }
@@ -333,7 +343,7 @@ pub enum OstreeError {
         "\
         systemd was not active.\n\
         \n\
-        If it will be started later consider, passing `--no-start-daemon`.\n\
+        If it will be started later, consider passing `--no-start-daemon`.\n\
         \n\
         To use a `root`-only Nix install, consider passing `--init none`."
     )]
@@ -344,7 +354,7 @@ pub enum OstreeError {
         \n\
         On WSL2, systemd is not enabled by default. Consider enabling it by adding it to your `/etc/wsl.conf` with `echo -e '[boot]\\nsystemd=true'` then restarting WSL2 with `wsl.exe --shutdown` and re-entering the WSL shell. For more information, see https://devblogs.microsoft.com/commandline/systemd-support-is-now-available-in-wsl/.\n\
         \n\
-        If it will be started later consider, passing `--no-start-daemon`.\n\
+        If it will be started later, consider passing `--no-start-daemon`.\n\
         \n\
         To use a `root`-only Nix install, consider passing `--init none`."
     )]
